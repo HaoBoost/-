@@ -130,9 +130,9 @@ class PomodoroApp:
         "card":      "#FFFDFB",
         "text":      "#766C65",
         "sub":       "#B0A89F",
-        "work":      "#C75B49",
-        "short":     "#A3AE9A",
-        "long":      "#9FA6B8",
+        "work":        "#C75B49",
+        "short_break": "#A3AE9A",
+        "long_break":  "#9FA6B8",
         "btn_start": "#C75B49",
         "btn_pause": "#E8DED5",
         "btn_reset": "#E7DEDB",
@@ -190,6 +190,7 @@ class PomodoroApp:
         self.pomodoro_count = 0
         self.always_on_top = tk.BooleanVar(value=False)
         self._after_id = None
+        self.delay_remaining = 0  # 阶段切换后的缓冲倒计时（秒）
 
         self._build_ui()
         self._update_display()
@@ -257,7 +258,7 @@ class PomodoroApp:
 
         # mode label
         self.mode_label = tk.Label(
-            card, text="", font=("Microsoft YaHei UI", 22, "bold"),
+            card, text="", font=("Microsoft YaHei UI", 28, "bold"),
             bg=C["card"], fg=C["text"]
         )
         self.mode_label.pack(pady=(4, 2))
@@ -447,37 +448,42 @@ class PomodoroApp:
         if self._after_id:
             self.root.after_cancel(self._after_id)
             self._after_id = None
+        self.delay_remaining = 0
         self.remaining = self._get_total_time()
         self.start_btn.set_disabled(False)
         self.pause_btn.set_disabled(True)
         self._update_display()
 
     def skip(self):
-        self.running = False
         if self._after_id:
             self.root.after_cancel(self._after_id)
             self._after_id = None
-        self._switch_mode()
+        self._switch_mode(delay=0)
+        self.running = True
+        self._after_id = self.root.after(1000, self._tick)
 
     def _tick(self):
         if not self.running:
             return
-        if self.remaining > 0:
+        if self.delay_remaining > 0:
+            self.delay_remaining -= 1
+            self._update_display()
+            self._after_id = self.root.after(1000, self._tick)
+        elif self.remaining > 0:
             self.remaining -= 1
             self._update_display()
             self._after_id = self.root.after(1000, self._tick)
         else:
-            self.running = False
-            self._after_id = None
-            self._on_timeout()
+            if self.mode == "work":
+                self.pomodoro_count += 1
+            old_mode = self.mode
+            self._switch_mode()
+            self._notify(old_mode)
+            self.remaining -= 1
+            self._update_display()
+            self._after_id = self.root.after(1000, self._tick)
 
-    def _on_timeout(self):
-        if self.mode == "work":
-            self.pomodoro_count += 1
-        self._notify()
-        self._switch_mode()
-
-    def _switch_mode(self):
+    def _switch_mode(self, delay=0):
         if self.mode == "work":
             if self.pomodoro_count > 0 and self.pomodoro_count % self.before_long == 0:
                 self.mode = "long_break"
@@ -487,8 +493,9 @@ class PomodoroApp:
             self.mode = "work"
 
         self.remaining = self._get_total_time()
-        self.start_btn.set_disabled(False)
-        self.pause_btn.set_disabled(True)
+        self.delay_remaining = delay
+        self.start_btn.set_disabled(True)
+        self.pause_btn.set_disabled(False)
         self._update_display()
 
     # ================================================================== #
@@ -496,6 +503,35 @@ class PomodoroApp:
     # ================================================================== #
     def _update_display(self):
         C = self.C
+
+        if self.delay_remaining > 0:
+            # 缓冲倒计时显示
+            self.timer_label.config(text=f"00:{self.delay_remaining:02d}")
+            color = C[self.mode]
+            self.timer_label.config(fg=color)
+            self.mode_label.config(
+                text=f"{self.MODE_ICONS[self.mode]}  {self.MODE_LABELS[self.mode]}",
+                fg=color
+            )
+            self.msg_label.config(text=f"即将开始，{self.delay_remaining} 秒后自动切换...")
+            self.progress.config(maximum=10, value=10 - self.delay_remaining)
+            style = ttk.Style()
+            style.configure("TProgressbar", background=color, troughcolor=C["trough"])
+            self.root.title(
+                f"准备 - {self.MODE_LABELS[self.mode]} - 00:{self.delay_remaining:02d}  番茄钟"
+            )
+
+            # dots
+            cycle = self.pomodoro_count % self.before_long
+            if self.pomodoro_count > 0 and cycle == 0:
+                cycle = self.before_long
+            filled = "\U0001F345 " * cycle
+            empty = "  ◦  " * (self.before_long - cycle)
+            self.dots_label.config(
+                text=f"已完成 {self.pomodoro_count} 个番茄  |  {filled}{empty}",
+            )
+            return
+
         minutes = self.remaining // 60
         seconds = self.remaining % 60
         self.timer_label.config(text=f"{minutes:02d}:{seconds:02d}")
@@ -531,11 +567,13 @@ class PomodoroApp:
     # ================================================================== #
     #  Notification
     # ================================================================== #
-    def _notify(self):
-        if self.mode == "work":
+    def _notify(self, mode=None):
+        if mode is None:
+            mode = self.mode
+        if mode == "work":
             title = " 番茄时间到！"
             msg = "专注时间结束，休息一下吧 ~"
-        elif self.mode == "short_break":
+        elif mode == "short_break":
             title = " 休息结束"
             msg = "准备好开始下一个番茄了吗？"
         else:
@@ -558,9 +596,9 @@ $textNodes.Item(1).AppendChild($template.CreateTextNode("{message}")) > $null
 $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("PomodoroApp").Show($toast)
 '''
-            subprocess.run(
+            subprocess.Popen(
                 ["powershell", "-NoProfile", "-Command", script],
-                capture_output=True, timeout=10,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
         except Exception:
